@@ -13,7 +13,7 @@ from GDesigner.prompt.prompt_set_registry import PromptSetRegistry
 from GDesigner.llm.profile_embedding import get_sentence_embedding
 from GDesigner.gnn.gcn import GCN, MLP
 from GDesigner.gnn.node_encoder import NodeEncoder
-from torch_geometric.utils import dense_to_sparse
+from torch_geometric.utils import dense_to_sparse, to_dense_adj
 
 class RefineModule(nn.Module):
     def __init__(self, num_nodes: int, rank: Optional[int] = None, zeta: float = 1e-3):
@@ -39,7 +39,8 @@ class RefineModule(nn.Module):
         return u[:, : self.rank]
 
     def forward(self, sketch_adj: torch.Tensor, anchor_adj: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        anchor_adj = anchor_adj.to(device=sketch_adj.device, dtype=sketch_adj.dtype)
+        anchor_adj = anchor_adj.to(device=sketch_adj.device, dtype=torch.long)
+        anchor_adj = to_dense_adj(anchor_adj).squeeze(0)[:-1, :-1]
         Z = self._compute_z(sketch_adj)
         reconstruction = Z @ self.W @ Z.transpose(0, 1)
         # reconstruction = 0.5 * (reconstruction + reconstruction.transpose(0, 1))
@@ -122,13 +123,13 @@ class Graph(ABC):
         self.optimized_temporal = optimized_temporal
         self.decision_node:Node = AgentRegistry.get(decision_method, **{"domain":self.domain,"llm_name":self.llm_name})
         self.nodes:Dict[str,Node] = {}
-        self.agent_node_ids: List[str] = []
+        # self.agent_node_ids: List[str] = []
         self.potential_spatial_edges:List[List[str, str]] = []
         self.potential_temporal_edges:List[List[str,str]] = []
         self.node_kwargs = node_kwargs if node_kwargs is not None else [{} for _ in agent_names]
         self.task_node = TaskNode(domain=self.domain, llm_name=self.llm_name)
-        self.virtual_task_id: Optional[str] = None
-        self.virtual_task_index: Optional[int] = None
+        # self.virtual_task_id: Optional[str] = None
+        # self.virtual_task_index: Optional[int] = None
 
         self.init_nodes() # add nodes to the self.nodes
         self.init_potential_edges() # add potential edges to the self.potential_spatial/temporal_edges
@@ -158,9 +159,9 @@ class Graph(ABC):
         self.prompt_set = PromptSetRegistry.get(domain)
         self.role_adj_matrix = self.construct_adj_matrix()
         self.features = self.construct_features()
-        self.node_encoder = NodeEncoder(self.features.size(1), self.features.size(1))
-        self.A_anchor, self.A_anchor_edge_index = self.construct_anchor_adj_matrix()
-        self.tilde_A_anchor = self.A_anchor
+        # self.node_encoder = NodeEncoder(self.features.size(1), self.features.size(1))
+        # self.A_anchor, self.A_anchor_edge_index = self.construct_anchor_adj_matrix()
+        # self.tilde_A_anchor = role_adj_matrix
         self.hidden_dim = 32
         self.latent_dim = 16
         self.gumbel_tau = gumbel_tau
@@ -170,7 +171,7 @@ class Graph(ABC):
         self.mlp = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim)
         self.encoder_mu = nn.Linear(self.hidden_dim, self.latent_dim)
         self.encoder_logvar = nn.Linear(self.hidden_dim, self.latent_dim)
-        self.ps_linear = nn.Linear(self.latent_dim, self.latent_dim)
+        self.ps_linear = nn.Linear(self.latent_dim*3, 1)
         self.refine = RefineModule(self.num_nodes, rank=refine_rank, zeta=refine_zeta)
         self.refine_losses: Dict[str, torch.Tensor] = {
             "L_anchor": torch.tensor(0.0),
@@ -184,19 +185,25 @@ class Graph(ABC):
         self.tilde_S: Optional[torch.Tensor] = None
 
         self.spatial_masks = torch.nn.Parameter(fixed_spatial_masks,requires_grad=False)  # fixed edge masks
-        self.spatial_edge_probs = torch.full((len(self.potential_spatial_edges),),
-                                             initial_spatial_probability,
-                                             dtype=torch.float32)
+        # self.spatial_edge_probs = torch.full((len(self.potential_spatial_edges),),
+        #                                      initial_spatial_probability,
+        #                                      dtype=torch.float32)
+        init_spatial_logit = torch.log(torch.tensor(initial_spatial_probability / (1 - initial_spatial_probability))) if optimized_spatial else 10.0
+        # self.spatial_logits = torch.nn.Parameter(torch.ones(len(self.potential_spatial_edges), requires_grad=optimized_spatial) * init_spatial_logit,
+        #                                          requires_grad=optimized_spatial) # trainable edge logits
 
         self.temporal_masks = torch.nn.Parameter(fixed_temporal_masks,requires_grad=False)  # fixed edge masks
-        self.temporal_edge_probs = torch.full((len(self.potential_temporal_edges),),
-                                              initial_temporal_probability,
-                                              dtype=torch.float32)
+        # self.temporal_edge_probs = torch.full((len(self.potential_temporal_edges),),
+        #                                       initial_temporal_probability,
+        #                                       dtype=torch.float32)
+        init_temporal_logit = torch.log(torch.tensor(initial_temporal_probability / (1 - initial_temporal_probability))) if optimized_temporal else 10.0
+        self.temporal_logits = torch.nn.Parameter(torch.ones(len(self.potential_temporal_edges), requires_grad=optimized_temporal) * init_temporal_logit,
+                                                 requires_grad=optimized_temporal) # trainable edge logits
     
     def construct_adj_matrix(self):
         role_connect:List[Tuple[str,str]] = self.prompt_set.get_role_connection()
         num_nodes = self.num_nodes
-        role_adj = torch.zeros((num_nodes,num_nodes))
+        role_adj = torch.zeros((num_nodes+1,num_nodes+1))
         role_2_id: Dict[str, List[int]] = {}
 
         for i, node_id in enumerate(self.nodes):
@@ -210,7 +217,8 @@ class Graph(ABC):
             for in_id in in_ids:
                 for out_id in out_ids:
                     role_adj[in_id][out_id] = 1
-
+        role_adj[:-1, -1] = 1
+        role_adj[-1, :-1] = 1
         edge_index, edge_weight = dense_to_sparse(role_adj)
         return edge_index
 
@@ -220,18 +228,24 @@ class Graph(ABC):
 
         for node_id in self.nodes:
             node = self.nodes[node_id]
-            if node_id == self.virtual_task_id:
-                if feature_dim is None:
-                    placeholder = torch.tensor(np.array(get_sentence_embedding("virtual task")), dtype=torch.float32)
-                    feature_dim = placeholder.size(0)
-                feature_tensor = torch.zeros(feature_dim, dtype=torch.float32)
-            else:
-                role = node.role
-                profile = self.prompt_set.get_description(role)
-                feature_array = get_sentence_embedding(profile)
-                feature_tensor = torch.tensor(np.array(feature_array), dtype=torch.float32)
-                if feature_dim is None:
-                    feature_dim = feature_tensor.size(0)
+            # if node_id == self.virtual_task_id:
+            #     if feature_dim is None:
+            #         placeholder = torch.tensor(np.array(get_sentence_embedding("virtual task")), dtype=torch.float32)
+            #         feature_dim = placeholder.size(0)
+            #     feature_tensor = torch.zeros(feature_dim, dtype=torch.float32)
+            # else:
+                # role = node.role
+                # profile = self.prompt_set.get_description(role)
+                # feature_array = get_sentence_embedding(profile)
+                # feature_tensor = torch.tensor(np.array(feature_array), dtype=torch.float32)
+                # if feature_dim is None:
+                #     feature_dim = feature_tensor.size(0)
+            role = node.role
+            profile = self.prompt_set.get_description(role)
+            feature_array = get_sentence_embedding(profile)
+            feature_tensor = torch.tensor(np.array(feature_array), dtype=torch.float32)
+            if feature_dim is None:
+                feature_dim = feature_tensor.size(0)
             features.append(feature_tensor)
 
         if not features:
@@ -241,52 +255,53 @@ class Graph(ABC):
 
     def construct_new_features(self, query):
         query_embedding = torch.tensor(np.array(get_sentence_embedding(query)), dtype=torch.float32)
-        query_features: List[torch.Tensor] = []
+        # query_features: List[torch.Tensor] = []
 
-        for node_id in self.nodes:
-            if node_id == self.virtual_task_id:
-                encoded = self.node_encoder(query_embedding)
-                query_features.append(encoded)
-            else:
-                query_features.append(query_embedding.clone())
+        # for node_id in self.nodes:
+        #     if node_id == self.virtual_task_id:
+        #         encoded = self.node_encoder(query_embedding)
+        #         query_features.append(encoded)
+        #     else:
+        #         query_features.append(query_embedding.clone())
 
-        query_feature_tensor = torch.stack(query_features)
-        new_features = query_feature_tensor
+        # query_feature_tensor = torch.stack(query_features)
+        # new_features = query_feature_tensor
+        new_features = torch.cat((self.features, query_embedding.reshape(1, -1)), dim=0)
         # new_features = torch.cat((self.features, query_feature_tensor), dim=1)
         self.tilde_X = new_features
         return new_features
 
-    def construct_anchor_adj_matrix(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        anchor_edges: List[Tuple[str, str]] = self.prompt_set.get_anchor_topology()
-        num_nodes = self.num_nodes
-        anchor_adj = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
-        role_2_id: Dict[str, List[int]] = {}
+    # def construct_anchor_adj_matrix(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    #     anchor_edges: List[Tuple[str, str]] = self.prompt_set.get_anchor_topology()
+    #     num_nodes = self.num_nodes
+    #     anchor_adj = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
+    #     role_2_id: Dict[str, List[int]] = {}
 
-        for i, node_id in enumerate(self.nodes):
-            role = self.nodes[node_id].role
-            role_2_id.setdefault(role, []).append(i)
+    #     for i, node_id in enumerate(self.nodes):
+    #         role = self.nodes[node_id].role
+    #         role_2_id.setdefault(role, []).append(i)
 
-        for edge in anchor_edges:
-            in_role, out_role = edge
-            in_ids = role_2_id.get(in_role, [])
-            out_ids = role_2_id.get(out_role, [])
-            for in_id in in_ids:
-                for out_id in out_ids:
-                    anchor_adj[in_id][out_id] = 1.0
+    #     for edge in anchor_edges:
+    #         in_role, out_role = edge
+    #         in_ids = role_2_id.get(in_role, [])
+    #         out_ids = role_2_id.get(out_role, [])
+    #         for in_id in in_ids:
+    #             for out_id in out_ids:
+    #                 anchor_adj[in_id][out_id] = 1.0
 
-        if self.virtual_task_id is not None:
-            if self.virtual_task_index is not None:
-                task_index = self.virtual_task_index
-            else:
-                task_index = list(self.nodes.keys()).index(self.virtual_task_id)
-            for idx, node_id in enumerate(self.nodes):
-                if node_id == self.virtual_task_id:
-                    continue
-                anchor_adj[task_index][idx] = 1.0
-                anchor_adj[idx][task_index] = 1.0
+    #     if self.virtual_task_id is not None:
+    #         if self.virtual_task_index is not None:
+    #             task_index = self.virtual_task_index
+    #         else:
+    #             task_index = list(self.nodes.keys()).index(self.virtual_task_id)
+    #         for idx, node_id in enumerate(self.nodes):
+    #             if node_id == self.virtual_task_id:
+    #                 continue
+    #             anchor_adj[task_index][idx] = 1.0
+    #             anchor_adj[idx][task_index] = 1.0
 
-        edge_index, _ = dense_to_sparse(anchor_adj)
-        return anchor_adj, edge_index
+    #     edge_index, _ = dense_to_sparse(anchor_adj)
+    #     return anchor_adj, edge_index
         
     @property
     def spatial_adj_matrix(self):
@@ -341,12 +356,12 @@ class Graph(ABC):
                 kwargs["llm_name"] = self.llm_name
                 agent_instance = AgentRegistry.get(agent_name, **kwargs)
                 added_node = self.add_node(agent_instance)
-                self.agent_node_ids.append(added_node.id)
+                # self.agent_node_ids.append(added_node.id)
 
-        if self.task_node is not None:
-            added_task = self.add_node(self.task_node)
-            self.virtual_task_id = added_task.id
-            self.virtual_task_index = len(self.nodes) - 1
+        # if self.task_node is not None:
+        #     added_task = self.add_node(self.task_node)
+        #     self.virtual_task_id = added_task.id
+        #     self.virtual_task_index = len(self.nodes) - 1
     
     def init_potential_edges(self):
         """
@@ -381,10 +396,9 @@ class Graph(ABC):
 
     def construct_spatial_connection(self, temperature: float = 1.0, threshold: float = None,): # temperature must >= 1.0
         self.clear_spatial_connection()
-        device = self.spatial_edge_probs.device
-        log_probs = [torch.tensor(0.0, device=device)]
-
-        for idx, (potential_connection, edge_mask) in enumerate(zip(self.potential_spatial_edges, self.spatial_masks)):
+        log_probs = [torch.tensor(0.0, requires_grad=self.optimized_spatial)]
+        
+        for potential_connection, edge_logit, edge_mask in zip(self.potential_spatial_edges, self.spatial_logits, self.spatial_masks):
             out_node:Node = self.find_node(potential_connection[0])
             in_node:Node = self.find_node(potential_connection[1])
             if edge_mask == 0.0:
@@ -394,27 +408,23 @@ class Graph(ABC):
                     out_node.add_successor(in_node,'spatial')
                 continue
             if not self.check_cycle(in_node, {out_node}):
-                edge_prob = self.spatial_edge_probs[idx]
-                edge_prob = torch.sigmoid(torch.logit(edge_prob, eps=1e-6) / temperature)
+                edge_prob = torch.sigmoid(edge_logit / temperature)
                 if threshold:
-                    hard_value = 1.0 if edge_prob.item() > threshold else 0.0
-                    edge_prob = torch.tensor(hard_value, dtype=edge_prob.dtype, device=device)
-                edge_prob = torch.clamp(edge_prob, min=1e-6, max=1 - 1e-6)
-                bernoulli = Bernoulli(probs=edge_prob)
-                sample = bernoulli.sample()
-                if sample.item() == 1.0:
+                    edge_prob = torch.tensor(1 if edge_prob > threshold else 0)
+                if torch.rand(1) < edge_prob:
                     out_node.add_successor(in_node,'spatial')
-                log_probs.append(bernoulli.log_prob(sample))
-
+                    log_probs.append(torch.log(edge_prob))
+                else:
+                    log_probs.append(torch.log(1 - edge_prob))
+                    
         return torch.sum(torch.stack(log_probs))
 
     def construct_temporal_connection(self, round:int = 0, temperature: float = 1.0, threshold: float = None,):  # temperature must >= 1.0
         self.clear_temporal_connection()
-        device = self.temporal_edge_probs.device
-        log_probs = [torch.tensor(0.0, device=device)]
+        log_probs = [torch.tensor(0.0, requires_grad=self.optimized_temporal)]
         if round == 0:
-            return torch.sum(torch.stack(log_probs))
-        for idx, (potential_connection, edge_mask) in enumerate(zip(self.potential_temporal_edges, self.temporal_masks)):
+            return torch.sum(torch.stack(log_probs))  
+        for potential_connection, edge_logit, edge_mask in zip(self.potential_temporal_edges, self.temporal_logits, self.temporal_masks):
             out_node:Node = self.find_node(potential_connection[0])
             in_node:Node = self.find_node(potential_connection[1])
             if edge_mask == 0.0:
@@ -423,19 +433,16 @@ class Graph(ABC):
                 if not self.check_cycle(in_node, {out_node}):
                     out_node.add_successor(in_node,'temporal')
                 continue
-
-            edge_prob = self.temporal_edge_probs[idx]
-            edge_prob = torch.sigmoid(torch.logit(edge_prob, eps=1e-6) / temperature)
+            
+            edge_prob = torch.sigmoid(edge_logit / temperature)
             if threshold:
-                hard_value = 1.0 if edge_prob.item() > threshold else 0.0
-                edge_prob = torch.tensor(hard_value, dtype=edge_prob.dtype, device=device)
-            edge_prob = torch.clamp(edge_prob, min=1e-6, max=1 - 1e-6)
-            bernoulli = Bernoulli(probs=edge_prob)
-            sample = bernoulli.sample()
-            if sample.item() == 1.0:
+                edge_prob = torch.tensor(1 if edge_prob > threshold else 0)
+            if torch.rand(1) < edge_prob:
                 out_node.add_successor(in_node,'temporal')
-            log_probs.append(bernoulli.log_prob(sample))
-
+                log_probs.append(torch.log(edge_prob))
+            else:
+                log_probs.append(torch.log(1 - edge_prob))
+                    
         return torch.sum(torch.stack(log_probs))
 
 
@@ -505,7 +512,7 @@ class Graph(ABC):
                         await asyncio.wait_for(self.nodes[current_node_id].async_execute(input),timeout=max_time) # output is saved in the node.outputs
                         break
                     except Exception as e:
-                        print(f"Error during execution of node {current_node_id}: {e}")
+                        print(f"Error during execution of node {current_node_id}: {str(e)}")
                     tries += 1
                 for successor in self.nodes[current_node_id].spatial_successors:
                     if successor.id not in self.nodes.keys():
@@ -536,17 +543,55 @@ class Graph(ABC):
         eps = torch.randn_like(std)
         return mu + eps * std
 
+    @staticmethod
+    def _offdiag_indices(n: int, device, dtype=torch.bool):
+        eye = torch.eye(n, dtype=dtype, device=device)
+        return torch.where(~eye)
+
     def ps(self, latent: torch.Tensor, tau: float) -> torch.Tensor:
-        transformed = self.ps_linear(latent)
-        similarity = torch.matmul(transformed, transformed.transpose(0, 1))
-        if self.ps_linear.training:
-            gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-9) + 1e-9)
-            logits = (similarity + gumbel_noise) / tau
-            return torch.sigmoid(logits)
-        return torch.sigmoid(similarity)
+        device, dtype = latent.device, latent.dtype
+        n_plus_1, h = latent.shape
+        n = n_plus_1 - 1
+
+        h_task = latent[-1]                               # (h,)
+        nodes  = latent[:-1]                              # (n, h)
+
+        idx_i, idx_j = self._offdiag_indices(n, device)
+        hi = nodes[idx_i]                                 # (m, h)
+        hj = nodes[idx_j]                                 # (m, h)
+        ht = h_task.expand(hi.size(0), h)                 # (m, h)
+        x  = torch.cat([hi, hj, ht], dim=-1)              # (m, 3h)
+
+        w = self.ps_linear(x).squeeze(-1)
+
+        g = torch.logit(torch.rand_like(w), eps=1e-6)     # (m,)
+
+        logits_off = (w + g) / tau                       # (m,)
+        logits_off = logits_off.clamp(min=-12, max=12)
+        if not torch.isfinite(logits_off).all():
+            print(f"[NaNGuard] logits_off has NaN/Inf")
+        if not torch.isfinite(w).all():
+            print(f"[NaNGuard] w has NaN/Inf")
+        if not torch.isfinite(g).all():
+            print(f"[NaNGuard] g has NaN/Inf")
+
+        A = torch.full((n, n), fill_value=-30.0, device=device, dtype=dtype)
+        A[idx_i, idx_j] = logits_off
+
+        P = torch.sigmoid(A)                              # (n, n)
+        if not torch.isfinite(P).all():
+            print(f"[NaNGuard] P has NaN/Inf")
+        return P
+        # transformed = self.ps_linear(latent)
+        # similarity = torch.matmul(transformed, transformed.transpose(0, 1))
+        # if self.ps_linear.training:
+        #     gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-9) + 1e-9)
+        #     logits = (similarity + gumbel_noise) / tau
+        #     return torch.sigmoid(logits)
+        # return torch.sigmoid(similarity)
 
     def qc(self, sketch_adj: torch.Tensor) -> torch.Tensor:
-        refined, losses = self.refine(sketch_adj, self.A_anchor)
+        refined, losses = self.refine(sketch_adj, self.role_adj_matrix)
         # store the most recent refine losses for downstream objectives
         self.refine_losses = {key: value for key, value in losses.items() if key in {"L_anchor", "L_sparse", "L_total"}}
         return refined
@@ -556,11 +601,11 @@ class Graph(ABC):
         self.latent_z = self.reparameterize(self.mu, self.logvar)
         sketch_adj = self.ps(self.latent_z, self.gumbel_tau)
         self.tilde_S = self.qc(sketch_adj)
-        flat_probs = torch.clamp(self.tilde_S, min=1e-6, max=1 - 1e-6).reshape(-1)
+        flat_probs = self.tilde_S.reshape(-1)
         if self.optimized_spatial:
-            self.spatial_edge_probs = flat_probs
-        if self.optimized_temporal:
-            self.temporal_edge_probs = flat_probs
+            self.spatial_logits = torch.logit(flat_probs, eps=1e-6)
+        # if self.optimized_temporal:
+        #     self.temporal_edge_probs = flat_probs
     
     def update_memory(self):
         for id,node in self.nodes.items():
@@ -578,24 +623,22 @@ class Graph(ABC):
         if self.optimized_spatial:
             num_edges = (self.spatial_masks > 0).sum()
             num_masks = (self.spatial_masks == 0).sum()
-            if num_edges.item() > 0:
-                prune_target = torch.round(num_edges * pruning_rate)
-                prune_num_edges = int(prune_target.item()) if prune_target.item() > 0 else 1
-                edge_scores = self.spatial_edge_probs.clone().detach()
-                edge_scores = torch.where(self.spatial_masks > 0, edge_scores, torch.tensor(1.0, dtype=edge_scores.dtype, device=edge_scores.device))
-                sorted_edges_idx = torch.argsort(edge_scores)
-                prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks.item())]
-                self.spatial_masks[prune_idx] = 0
-
+            prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
+            _edge_logits = self.spatial_logits.clone()
+            min_edge_logit = _edge_logits.min()
+            _edge_logits[self.spatial_masks == 0] = min_edge_logit - 1.0
+            sorted_edges_idx = torch.argsort(_edge_logits)
+            prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
+            self.spatial_masks[prune_idx] = 0
+        
         if self.optimized_temporal:
             num_edges = (self.temporal_masks > 0).sum()
             num_masks = (self.temporal_masks == 0).sum()
-            if num_edges.item() > 0:
-                prune_target = torch.round(num_edges * pruning_rate)
-                prune_num_edges = int(prune_target.item()) if prune_target.item() > 0 else 1
-                edge_scores = self.temporal_edge_probs.clone().detach()
-                edge_scores = torch.where(self.temporal_masks > 0, edge_scores, torch.tensor(1.0, dtype=edge_scores.dtype, device=edge_scores.device))
-                sorted_edges_idx = torch.argsort(edge_scores)
-                prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks.item())]
-                self.temporal_masks[prune_idx] = 0
+            prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
+            _edge_logits = self.temporal_logits.clone()
+            min_edge_logit = _edge_logits.min()
+            _edge_logits[self.temporal_masks == 0] = min_edge_logit - 1.0
+            sorted_edges_idx = torch.argsort(_edge_logits)
+            prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
+            self.temporal_masks[prune_idx] = 0
         return self.spatial_masks, self.temporal_masks

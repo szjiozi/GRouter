@@ -99,7 +99,13 @@ OPENAI_MODEL_INFO ={
             "training": "Jan 2024", 
             "input": 0.005, 
             "output": 0.015
-        }, 
+        },
+        "gpt-4o-mini": {
+            "context window": 128000, 
+            "training": "Jan 2024", 
+            "input": 0.00015, 
+            "output": 0.0006
+        },  
     },
     "gpt-3.5": {
         "current_recommended": "gpt-3.5-turbo-1106",

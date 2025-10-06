@@ -58,7 +58,7 @@ def parse_args():
                         help='The decison method of the GDesigner')
     parser.add_argument('--optimized_spatial',action='store_true')
     parser.add_argument('--optimized_temporal',action='store_true')
-    parser.add_argument('--gumbel_tau', type=float, default=1e-2,
+    parser.add_argument('--gumbel_tau', type=float, default=1,
                         help="Gumbel-Softmax temperature for edge sampling.")
     parser.add_argument('--refine_rank', type=int, default=2,
                         help="Rank used in the refine module (default uses full rank).")
@@ -112,8 +112,16 @@ async def main():
     trainable_params += list(graph.mlp.parameters())
     trainable_params += list(graph.encoder_mu.parameters())
     trainable_params += list(graph.encoder_logvar.parameters())
-    trainable_params += list(graph.qs_linear.parameters())
+    trainable_params += list(graph.ps_linear.parameters())
     trainable_params += list(graph.refine.parameters())
+    trainable_models = {
+        "gcn": graph.gcn, 
+        "mlp": graph.mlp,
+        "encoder_mu": graph.encoder_mu,
+        "encoder_logvar": graph.encoder_logvar,
+        "ps_linear": graph.ps_linear,
+        "refine": graph.refine
+    }
     optimizer = torch.optim.Adam(trainable_params, lr=args.lr)   
 
     anchor_weight = args.anchor_weight
@@ -140,7 +148,7 @@ async def main():
             realized_graph.mlp = graph.mlp
             realized_graph.encoder_mu = graph.encoder_mu
             realized_graph.encoder_logvar = graph.encoder_logvar
-            realized_graph.qs_linear = graph.qs_linear
+            realized_graph.ps_linear = graph.ps_linear
             realized_graph.refine = graph.refine
             realized_graphs.append(realized_graph)
             task = record["task"]
@@ -183,6 +191,7 @@ async def main():
                 "utility": utility,
                 "anchor_loss": anchor_losses[-1].item(),
                 "sparse_loss": sparse_losses[-1].item(),
+                "cost": Cost.instance().value,
             }
             data.append(updated_item)
         with open(result_file, 'w',encoding='utf-8') as file:
@@ -192,9 +201,16 @@ async def main():
         L_anchor = torch.mean(torch.stack(anchor_losses)) if anchor_losses else torch.tensor(0.0, device=device)
         L_sparse = torch.mean(torch.stack(sparse_losses)) if sparse_losses else torch.tensor(0.0, device=device)
         L_GDesigner = L_utility + anchor_weight * L_anchor + sparse_weight * L_sparse
+        if not torch.isfinite(L_GDesigner):
+            print(f"[NaNGuard] L_GDesigner has NaN/Inf")
         if args.optimized_spatial or args.optimized_temporal:
             optimizer.zero_grad()
             L_GDesigner.backward()
+            for model_name, model in trainable_models.items():
+                for name, p in model.named_parameters():
+                    if p.grad is not None and not torch.isfinite(p.grad).all():
+                        print(model_name)
+                        print(f"[NaNGuard] {name}.grad has NaN/Inf")
             optimizer.step()
         
         print(f"Batch time {time.time() - start_ts:.3f}")
