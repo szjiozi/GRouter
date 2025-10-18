@@ -205,7 +205,25 @@ class Graph(ABC):
         self.temporal_logits = torch.nn.Parameter(torch.ones(len(self.potential_temporal_edges), requires_grad=optimized_temporal) * init_temporal_logit,
                                                  requires_grad=optimized_temporal) # trainable edge logits
         self.group_conversation_history: List[Dict[str,str]] = []
+        if self.optimized_spatial:
+            self.train()
     
+    def train(self):
+        self.gcn.train()
+        self.mlp.train()
+        self.encoder_mu.train()
+        self.encoder_logvar.train()
+        self.ps_linear.train()
+        self.refine.train()
+    
+    def eval(self):
+        self.gcn.eval()
+        self.mlp.eval()
+        self.encoder_mu.eval()
+        self.encoder_logvar.eval()
+        self.ps_linear.eval()
+        self.refine.eval()
+
     def construct_adj_matrix(self):
         role_connect:List[Tuple[str,str]] = self.prompt_set.get_role_connection()
         num_nodes = self.num_nodes

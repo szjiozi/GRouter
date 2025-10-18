@@ -19,6 +19,7 @@ from GDesigner.tools.reader.readers import JSONLReader
 from GDesigner.utils.globals import Time
 from GDesigner.utils.globals import Cost, PromptTokens, CompletionTokens
 from datasets.gsm8k_dataset import gsm_data_process,gsm_get_predict
+from experiments.utils import get_optimizer
 
 def load_result(result_file):
     if not result_file.exists():
@@ -128,29 +129,10 @@ async def main():
                     refine_rank=args.refine_rank,
                     refine_zeta=args.refine_zeta,
                     **kwargs)
-    graph.gcn.train()
-    graph.mlp.train()
-    graph.encoder_mu.train()
-    graph.encoder_logvar.train()
-    graph.ps_linear.train()
-    graph.refine.train()
     device = next(graph.gcn.parameters()).device
-    trainable_params = []
-    trainable_params += list(graph.gcn.parameters())
-    trainable_params += list(graph.mlp.parameters())
-    trainable_params += list(graph.encoder_mu.parameters())
-    trainable_params += list(graph.encoder_logvar.parameters())
-    trainable_params += list(graph.ps_linear.parameters())
-    trainable_params += list(graph.refine.parameters())
-    trainable_models = {
-        "gcn": graph.gcn, 
-        "mlp": graph.mlp,
-        "encoder_mu": graph.encoder_mu,
-        "encoder_logvar": graph.encoder_logvar,
-        "ps_linear": graph.ps_linear,
-        "refine": graph.refine
-    }
-    optimizer = torch.optim.Adam(trainable_params, lr=args.lr)   
+    
+    if args.optimized_spatial:
+        optimizer, trainable_models = get_optimizer(graph, lr=args.lr)
 
     anchor_weight = args.anchor_weight
     sparse_weight = args.sparse_weight
@@ -258,12 +240,7 @@ async def main():
             args.optimized_temporal = False
             total_solved = 0
             total_executed = 0
-            graph.gcn.eval()
-            graph.mlp.eval()
-            graph.encoder_mu.eval()
-            graph.encoder_logvar.eval()
-            graph.ps_linear.eval()
-            graph.refine.eval()
+            graph.eval()
             print("Start Eval")
             
         print(f"Cost {Cost.instance().value}")
