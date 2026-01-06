@@ -93,10 +93,10 @@ def parse_args():
 
 async def main():
     args = parse_args()
-    args.optimized_spatial = True
-    args.experiment_name = "gsm8k_router_inference_gpt-4.1-nano_gpt-4o-mini_deepseek-v3"
-    args.use_checkpoint = True
-    args.dataset_start_index = 0
+    # args.optimized_spatial = True
+    # args.experiment_name = "gsm8k_router_inference_gpt-4.1-nano_gpt-4o-mini_deepseek-v3"
+    # args.use_checkpoint = True
+    # args.dataset_start_index = 0
     # args.num_of_data = 100
     model_paths = {
         "gpt-4o-mini": "/Users/chenjunzhi/Desktop/context_efficient_agent/GDesigner/graph_result/train_gsm8k_gpt4o-mini",
@@ -142,6 +142,12 @@ async def main():
             executed_batch = len(data)/args.batch_size
             last_result = data[-1]
             total_solved, total_executed = last_result["Total solved"], last_result["Total executed"]
+            cost = last_result["cost"]
+            prompt_tokens = last_result["prompt_tokens"]
+            completion_tokens = last_result["completion_tokens"]
+            Cost.instance().value = cost
+            PromptTokens.instance().value = prompt_tokens
+            CompletionTokens.instance().value = completion_tokens
         else:
             total_solved, total_executed = (0, 0)
     else:

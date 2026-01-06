@@ -107,6 +107,12 @@ async def main():
             executed_batch = len(data)/args.batch_size
             last_result = data[-1]
             total_solved, total_executed = last_result["Total solved"], last_result["Total executed"]
+            cost = last_result["cost"]
+            prompt_tokens = last_result["prompt_tokens"]
+            completion_tokens = last_result["completion_tokens"]
+            Cost.instance().value = cost
+            PromptTokens.instance().value = prompt_tokens
+            CompletionTokens.instance().value = completion_tokens
         else:
             total_solved, total_executed = (0, 0)
     else:
