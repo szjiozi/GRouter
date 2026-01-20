@@ -56,7 +56,7 @@ class AnalyzeAgent(Node):
         """ Use the processed input to get the result """
         system_prompt, user_prompt = await self._process_inputs(input, spatial_info, temporal_info)
         message = [{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}]
-        response = await self.llm.agen(message)
+        response, price, prompt_len, completion_len = await self.llm.agen(message)
         if self.wiki_summary != "":
             response += f"\n\n{self.wiki_summary}"
             self.wiki_summary = ""
@@ -66,5 +66,8 @@ class AnalyzeAgent(Node):
         self.inputs.append({
             "system": system_prompt,
             "user": user_prompt,
+            "price": price,
+            "prompt_len": prompt_len,
+            "completion_len": completion_len,
         })
         return response
