@@ -76,14 +76,26 @@ class CodeWriting(Node):
         system_prompt, user_prompt = self._process_inputs(input, spatial_info, temporal_info)
         ## test
         if system_prompt == "is_solved":
+
+            self.inputs.append({
+                "system": system_prompt,
+                "user": user_prompt,
+                "price": 0,
+                "prompt_len": 0,
+                "completion_len": 0,
+            })
+            
             return user_prompt
         message = [{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}]
-        response = await self.llm.agen(message)
+        response, price, prompt_len, completion_len = await self.llm.agen(message)
         print(f"################system prompt:{system_prompt}")
         print(f"################user prompt:{user_prompt}")
         print(f"################response:{response}")
         self.inputs.append({
             "system": system_prompt,
             "user": user_prompt,
+            "price": price,
+            "prompt_len": prompt_len,
+            "completion_len": completion_len,
         })
         return response
