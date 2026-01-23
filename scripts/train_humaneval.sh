@@ -1,5 +1,5 @@
 export OPENAI_API_KEY=""
-export OPENAI_BASE_URL="https://api.shubiaobiao.cn/v1/"
+export OPENAI_BASE_URL=""
 experiment_name="train_humaneval_gpt4o-mini"
 graph_dir="/workspace/ziqi/GRouter/graph_result/$experiment_name"
 
