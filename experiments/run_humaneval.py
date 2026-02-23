@@ -10,17 +10,15 @@ import torch
 import copy
 from typing import List,Union,Literal
 import random
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.stdout.reconfigure(encoding='utf-8')
 
-from GDesigner.utils.const import GDesigner_ROOT
 from GDesigner.graph.graph import Graph
 from GDesigner.tools.reader.readers import JSONLReader
 from GDesigner.tools.coding.python_executor import PyExecutor
 from GDesigner.utils.globals import Time
+from GDesigner.utils.const import GDesigner_ROOT
 from GDesigner.utils.globals import Cost, PromptTokens, CompletionTokens
-from experiments.utils import get_optimizer
 
 def load_result(result_file):
     if not result_file.exists():
@@ -42,7 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="GDesigner Experiments on HumanEval")
     parser.add_argument("--dataset_json", type=str, default="datasets/humaneval/humaneval-py.jsonl")
     parser.add_argument("--result_file", type=str, default=None)
-    parser.add_argument("--llm_name", type=str, default="gpt-4o-mini")
+    parser.add_argument("--llm_name", type=str, default="gpt-4-1106-preview")
     parser.add_argument('--mode', type=str, default='FullConnected',
                         choices=['DirectAnswer', 'FullConnected', 'Random', 'Chain','Debate','Layered','Star'],
                         help="Mode of operation. Default is 'FullConnected'.")
@@ -61,28 +59,6 @@ def parse_args():
     parser.add_argument('--optimized_spatial',action='store_true')
     parser.add_argument('--optimized_temporal',action='store_true')
     
-    # New arguments for training
-    parser.add_argument('--gumbel_tau', type=float, default=1,
-                        help="Gumbel-Softmax temperature for edge sampling.")
-    parser.add_argument('--refine_rank', type=int, default=2,
-                        help="Rank used in the refine module (default uses full rank).")
-    parser.add_argument('--refine_zeta', type=float, default=1e-1,
-                        help="Nuclear norm regularization strength for the refine module.")
-    parser.add_argument('--anchor_weight', type=float, default=1.0,
-                        help="Weight of the anchor loss during training.")
-    parser.add_argument('--sparse_weight', type=float, default=1.0,
-                        help="Weight of the sparse regularization loss during training.")
-    parser.add_argument('--from_graph_dir', type=str, default=None,
-                        help="Directory to load the graph.")
-    parser.add_argument('--to_graph_dir', type=str, default=None,
-                        help="Directory to save the graph.")
-    parser.add_argument('--experiment_name', type=str, default=None,
-                        help="Name of the experiment.")
-    parser.add_argument('--dataset_start_index', type=int, default=0,
-                        help="Start index of the dataset.")
-    parser.add_argument('--num_of_data', type=int, default=None,
-                        help="Number of data to run.")
-    
     args = parser.parse_args()
     result_path = GDesigner_ROOT / "result"
     os.makedirs(result_path, exist_ok=True)
@@ -95,108 +71,32 @@ async def main():
     args = parse_args()
     result_file = None
     dataset = JSONLReader.parse_file(args.dataset_json)
-    dataset = dataset[args.dataset_start_index:]  # TODO: Check
     current_time = Time.instance().value or time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     Time.instance().value = current_time
-
-    # Result file and resume logic
-    executed_batch = None
-    if args.experiment_name:
-        experiment_dir = Path(f"{GDesigner_ROOT}/result/{args.experiment_name}")
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-        result_dir = experiment_dir / f"{args.domain}_{args.llm_name}"
-        result_dir.mkdir(parents=True, exist_ok=True)
-        result_file = result_dir / f"result.json"
-        if result_file.exists():
-            data = load_result(result_file)
-            executed_batch = len(data)/args.batch_size
-            last_result = data[-1]
-            total_solved, total_executed = last_result["Total solved"], last_result["Total executed"]
-            cost = last_result["cost"]
-            prompt_tokens = last_result["prompt_tokens"]
-            completion_tokens = last_result["completion_tokens"]
-            Cost.instance().value = cost
-            PromptTokens.instance().value = prompt_tokens
-            CompletionTokens.instance().value = completion_tokens
-        else:
-            total_solved, total_executed = (0, 0)
-    else:
-        result_dir = Path(f"{GDesigner_ROOT}/result/humaneval")
-        result_dir.mkdir(parents=True, exist_ok=True)
-        result_file = result_dir / f"{args.domain}_{args.llm_name}_{current_time}.json"
-        if result_file.exists():
-            data = load_result(result_file)
-            executed_batch = len(data)/args.batch_size
-            last_result = data[-1]
-            total_solved, total_executed = last_result["Total Solved"], last_result["Total executed"]
-        else:
-            total_solved, total_executed = (0, 0)
+    result_dir = Path(f"{GDesigner_ROOT}/result/eval")
+    result_dir.mkdir(parents=True, exist_ok=True)
+    result_file = result_dir / f"{args.llm_name}_{current_time}.json"
     
     agent_names = [name for name,num in zip(args.agent_names,args.agent_nums) for _ in range(num)]
     decision_method = args.decision_method
     kwargs = get_kwargs(args.mode,len(agent_names))
-    
-    if args.from_graph_dir and executed_batch:
-        graph = Graph.load_graph(
-            graph_dir = args.from_graph_dir,
-            domain="humaneval",
-            llm_name=args.llm_name,
-            agent_names=agent_names,
-            decision_method=decision_method,
-            optimized_spatial=args.optimized_spatial,
-            optimized_temporal=args.optimized_temporal,
-            gumbel_tau=args.gumbel_tau,
-            refine_rank=args.refine_rank,
-            refine_zeta=args.refine_zeta,
-            **kwargs
-        )
-    else:
-        graph = Graph(domain="humaneval",
-                    llm_name=args.llm_name,
-                    agent_names=agent_names,
-                    decision_method=decision_method,
-                    optimized_spatial=args.optimized_spatial,
-                    optimized_temporal=args.optimized_temporal,
-                    gumbel_tau=args.gumbel_tau,
-                    refine_rank=args.refine_rank,
-                    refine_zeta=args.refine_zeta,
-                    **kwargs)
-    device = next(graph.gcn.parameters()).device
-    print(f"Device: {device}")
-
-    args.optimized_spatial = False
-    args.optimized_temporal = False
-    graph.eval()
-    print("Start Eval")
-
-    # graph.gcn.train()
-    # optimizer = torch.optim.Adam(graph.gcn.parameters(), lr=args.lr) 
-    # if args.optimized_spatial:
-    #     optimizer, trainable_models = get_optimizer(graph, lr=args.lr)
-
-    anchor_weight = args.anchor_weight
-    sparse_weight = args.sparse_weight   
+    graph = Graph(domain="humaneval",
+                  llm_name=args.llm_name,
+                  agent_names=agent_names,
+                  decision_method=decision_method,
+                  optimized_spatial=args.optimized_spatial,
+                  optimized_temporal=args.optimized_temporal,
+                  **kwargs)
+    graph.gcn.train()
+    optimizer = torch.optim.Adam(graph.gcn.parameters(), lr=args.lr)    
     
     num_batches = int(len(dataset)/args.batch_size)
-    # total_solved, total_executed = (0, 0)
+    total_solved, total_executed = (0, 0)
     for i_batch in range(num_batches):
-
-        if executed_batch:
-            if i_batch < executed_batch:
-                # if i_batch+1 == args.num_iterations:
-                #     args.optimized_spatial = False
-                #     args.optimized_temporal = False
-                #     total_solved = 0
-                #     total_executed = 0
-                #     graph.eval()
-                #     print("Start Eval")
-                continue
-
         print(f"Batch {i_batch}",80*'-')
         start_ts = time.time()
         answer_log_probs = []
         tests = []
-        realized_graphs: List[Graph] = []
         
         current_batch = dataloader(dataset,args.batch_size,i_batch)
         if current_batch is None:
@@ -207,13 +107,6 @@ async def main():
             realized_graph = copy.deepcopy(graph)
             realized_graph.gcn = graph.gcn
             realized_graph.mlp = graph.mlp
-
-            realized_graph.encoder_mu = graph.encoder_mu
-            realized_graph.encoder_logvar = graph.encoder_logvar
-            realized_graph.ps_linear = graph.ps_linear
-            realized_graph.refine = graph.refine
-            realized_graphs.append(realized_graph)
-
             task = record["prompt"]
             test = record["test"]
             tests.append(test)
@@ -224,10 +117,8 @@ async def main():
         loss_list: List[torch.Tensor] = []
         utilities: List[float] = []
         data = load_result(result_file)
-        anchor_losses: List[torch.Tensor] = []
-        sparse_losses: List[torch.Tensor] = []
         
-        for realized_graph, task, answer, log_prob, test in zip(realized_graphs, current_batch, raw_answers, log_probs, tests):
+        for task, answer, log_prob, test in zip(current_batch, raw_answers, log_probs, tests):
             if not isinstance(answer,list):
                 raise TypeError(f"Expected a list for the answer, but got {type(answer).__name__}")
             answer = answer[0].lstrip("```python\n").rstrip("\n```")
@@ -235,16 +126,10 @@ async def main():
             total_solved = total_solved + is_solved
             total_executed = total_executed + 1
             accuracy = total_solved/ total_executed
-
             utility = is_solved
             utilities.append(utility)
             single_loss = -log_prob * utility
             loss_list.append(single_loss)
-
-            if hasattr(realized_graph, "refine_losses"):
-                anchor_losses.append(realized_graph.refine_losses.get("L_anchor", torch.tensor(0.0, device=device)).to(device))
-                sparse_losses.append(realized_graph.refine_losses.get("L_sparse", torch.tensor(0.0, device=device)).to(device))
-
             updated_item = {
                 "Question": task,
                 "Tests": test,
@@ -253,71 +138,34 @@ async def main():
                 "Solution": answer,
                 "Total solved": total_solved,
                 "Total executed": total_executed,
-                "Accuracy": accuracy,
-                "utility": utility,
-                "anchor_loss": anchor_losses[-1].item(),
-                "sparse_loss": sparse_losses[-1].item(),
-                "cost": Cost.instance().value,
-                "prompt_tokens": PromptTokens.instance().value,
-                "completion_tokens": CompletionTokens.instance().value,
+                "Accuracy": accuracy
             }
             data.append(updated_item)
-            realized_graph.save_result(result_dir, str(total_executed))
         with open(result_file, 'w',encoding='utf-8') as file:
             json.dump(data, file, indent=4)
         
-        # total_loss = torch.mean(torch.stack(loss_list))
-        # if args.optimized_spatial or args.optimized_temporal:
-        #     optimizer.zero_grad()
-        #     total_loss.backward()
-        #     optimizer.step()
-        # print(f"Batch time {time.time() - start_ts:.3f}")
-        # print(f"Accuracy: {accuracy}")
-        # print("utilities:", utilities)
-        # print("loss:", total_loss.item())
-
-        L_utility = torch.mean(torch.stack(loss_list)) if loss_list else torch.tensor(0.0, device=device)
-        L_anchor = torch.mean(torch.stack(anchor_losses)) if anchor_losses else torch.tensor(0.0, device=device)
-        L_sparse = torch.mean(torch.stack(sparse_losses)) if sparse_losses else torch.tensor(0.0, device=device)
-        L_GDesigner = L_utility + anchor_weight * L_anchor + sparse_weight * L_sparse
-        if not torch.isfinite(L_GDesigner):
-            print(f"[NaNGuard] L_GDesigner has NaN/Inf")
-        # if args.optimized_spatial or args.optimized_temporal:
-        #     optimizer.zero_grad()
-        #     L_GDesigner.backward()
-        #     for model_name, model in trainable_models.items():
-        #         for name, p in model.named_parameters():
-        #             if p.grad is not None and not torch.isfinite(p.grad).all():
-        #                 print(model_name)
-        #                 print(f"[NaNGuard] {name}.grad has NaN/Inf")
-        #     optimizer.step()
-        
+        total_loss = torch.mean(torch.stack(loss_list))
+        if args.optimized_spatial or args.optimized_temporal:
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
         print(f"Batch time {time.time() - start_ts:.3f}")
         print(f"Accuracy: {accuracy}")
         print("utilities:", utilities)
-        print("loss:", L_GDesigner.item())
-        print("L_utility:", L_utility.item())
-        print("L_anchor:", L_anchor.item())
-        print("L_sparse:", L_sparse.item())
-        print("L_GDesigner:", L_GDesigner.item())
+        print("loss:", total_loss.item())
 
-        # if i_batch+1 == args.num_iterations:
-        #     if args.to_graph_dir:
-        #         graph.save_graph(args.to_graph_dir)
-        #     args.optimized_spatial = False
-        #     args.optimized_temporal = False
-        #     total_solved = 0
-        #     total_executed = 0
-        #     graph.eval()
-        #     print("Start Eval")
-        #     break
+        if i_batch+1 == args.num_iterations:
+            args.optimized_spatial = False
+            args.optimized_temporal = False
+            total_solved = 0
+            total_executed = 0
+            graph.gcn.eval()
+            print("Start Eval")
             
         print(f"Cost {Cost.instance().value}")
         print(f"PromptTokens {PromptTokens.instance().value}")
         print(f"CompletionTokens {CompletionTokens.instance().value}")
 
-        if args.num_of_data and total_executed >= args.num_of_data:
-            break
 
 
 def get_kwargs(mode:Union[Literal['DirectAnswer'],Literal['FullConnected'],Literal['Random'],Literal['Chain'],Literal['Debate'],Literal['Layered'],Literal['Star']],
